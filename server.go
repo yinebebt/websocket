@@ -1,11 +1,13 @@
-/*websocket demo via Golang websocket*/
+//go:build server
+
 package main
 
 import (
-	"fmt"
 	"golang.org/x/net/websocket"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 )
 
@@ -20,8 +22,11 @@ func NewServer() *Server {
 	}
 }
 
+var sessionCount int
+
 func (s *Server) HandleWS(ws *websocket.Conn) {
-	fmt.Println("New WebSocket Connection:", ws.RemoteAddr().String())
+	sessionCount++
+	log.Printf("new session-%v started\n", sessionCount)
 	s.mu.Lock()
 	s.conns[ws] = true
 	s.mu.Unlock()
@@ -33,7 +38,8 @@ func (s *Server) HandleWS(ws *websocket.Conn) {
 	delete(s.conns, ws)
 	s.mu.Unlock()
 	ws.Close()
-	fmt.Println("WebSocket Connection closed:", ws.RemoteAddr().String())
+	sessionCount--
+	log.Println("ws session closed")
 }
 
 func (s *Server) readLoop(ws *websocket.Conn) {
@@ -44,34 +50,35 @@ func (s *Server) readLoop(ws *websocket.Conn) {
 			if err == io.EOF {
 				break
 			}
-			fmt.Println("Error reading from websocket:", err)
+			log.Printf("read error:%v", err)
 			break
 		}
 		msg := buf[:n]
-		s.broadcast(msg)
-		fmt.Println("Message received:", string(msg))
-		if _, err := ws.Write([]byte("Thank you for the message!")); err != nil {
-			fmt.Println("Error writing to websocket:", err)
+		if _, err := ws.Write(msg); err != nil {
+			log.Printf("write error:%v\n", err)
 			break
 		}
 	}
 }
 
+// broadcast sent back received message to all client.
 func (s *Server) broadcast(msg []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ws := range s.conns {
 		go func(ws *websocket.Conn) {
 			if _, err := ws.Write(msg); err != nil {
-				fmt.Println("Error writing to websocket:", err)
+				log.Printf("broadcast: write error:%v\n", err)
 			}
 		}(ws)
 	}
 }
 
 func handshake(config *websocket.Config, req *http.Request) error {
-	// todo: Custom handshake logic (e.g., not checking Origin header)
-	if config.Origin.String() != "" {
+	if origin := config.Origin; origin != nil {
+		if origin.String() != req.Header.Get("Origin") {
+			log.Printf("origin not allowed:%v\n", origin)
+		}
 		req.Header.Set("Origin", config.Origin.String())
 	}
 	return nil
@@ -79,16 +86,21 @@ func handshake(config *websocket.Config, req *http.Request) error {
 
 func main() {
 	server := NewServer()
-	ser := websocket.Server{
+	srv := websocket.Server{
 		Handler:   websocket.Handler(server.HandleWS),
 		Handshake: handshake,
+		Config:    websocket.Config{},
 	}
-	http.Handle("/ws", ser)
-	// websocket.Handler handle handshake implicitly,it checks if the origin is valid url.
-	// http.Handle("/ws", websocket.Handler(server.HandleWS))
-	err := http.ListenAndServe(":3000", nil)
+	http.Handle("/channel", srv)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+
+	log.Printf("starting ws server at:%v/ws\n", port)
+	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
-		fmt.Println("Error starting server:", err)
+		log.Printf("error while starting ws server:%v\n", err)
 		return
 	}
 }
